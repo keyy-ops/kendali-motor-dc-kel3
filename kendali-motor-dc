@@ -1,0 +1,177 @@
+#include <Keypad.h>
+#include <Wire.h>
+#include <EEPROM.h>
+#include <LiquidCrystal_I2C.h>
+#include <SoftwareSerial.h>
+
+// Konfigurasi Bluetooth
+SoftwareSerial bluetoothSerial(13, 12); // TX ke 13, RX ke 12
+
+// LCD I2C
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+// Konfigurasi motor driver L298N
+#define IN1 A0
+#define IN2 A1
+#define ENA 3  // PWM untuk kecepatan motor
+
+// Konfigurasi sensor encoder
+#define ENCODER_PIN 2
+volatile int pulse_count = 0;
+unsigned long last_time = 0;
+float actual_rpm = 0.0;
+
+char customKey;
+const byte ROWS = 4;
+const byte COLS = 4;
+
+// Konfigurasi keypad
+char keys[ROWS][COLS] = {
+  {'D', 'C', 'B', 'A'},
+  {'#', '9', '6', '3'},
+  {'0', '8', '5', '2'},
+  {'*', '7', '4', '1'}
+};
+byte rowPins[ROWS] = {4, 5, 6, 7};
+byte colPins[COLS] = {8, 9, 10, 11};
+Keypad customKeypad = Keypad(makeKeymap(keys), rowPins, colPins, ROWS, COLS);
+
+int speed_pwm = 0;
+float set_rpm = 0;
+boolean motorRunning = false;
+
+void setup() {
+  lcd.init();
+  lcd.backlight();
+  lcd.clear();
+  lcd.noCursor();
+  
+  attachInterrupt(digitalPinToInterrupt(ENCODER_PIN), rpm_fun, RISING);
+  pinMode(ENCODER_PIN, INPUT_PULLUP);
+
+  pinMode(IN1, OUTPUT);
+  pinMode(IN2, OUTPUT);
+  pinMode(ENA, OUTPUT);
+  
+  digitalWrite(IN1, HIGH);
+  digitalWrite(IN2, LOW);
+
+  Serial.begin(9600);
+  bluetoothSerial.begin(9600);
+
+  Serial.println("CLEARDATA");
+  Serial.println("LABEL,Time,Set_RPM,Actual_RPM");
+
+  lcd.setCursor(0, 0);
+  lcd.print("Set PWM:");
+  lcd.setCursor(0, 1);
+  lcd.print("A: Start B: Stop");
+
+  last_time = millis();
+}
+
+void loop() {
+  // Membaca Input dari Keypad atau Bluetooth
+  if (bluetoothSerial.available()) {
+    customKey = bluetoothSerial.read();
+    handleKey(customKey);
+  }
+
+  customKey = customKeypad.getKey();
+  if (customKey) {
+    handleKey(customKey);
+  }
+
+  // Menghitung RPM aktual setiap 1 detik
+  unsigned long current_time = millis();
+  if (current_time - last_time >= 1000) {
+    actual_rpm = (pulse_count / 2.0) * 60.0; // Konversi pulse ke RPM (misal 20 pulse per putaran)
+    pulse_count = 0;
+    last_time = current_time;
+
+    // Menampilkan di LCD
+    lcd.setCursor(0, 1);
+    lcd.print("RPM: ");
+    lcd.print(actual_rpm);
+    lcd.print("   "); // Menghapus digit lama
+
+    // Mengirim data ke Serial Monitor
+    Serial.print("RPM:");
+    Serial.println(actual_rpm);
+    bluetoothSerial.print("*P");
+  bluetoothSerial.println((int)set_rpm);
+    bluetoothSerial.print("*G");
+    bluetoothSerial.println((int)actual_rpm); 
+}
+}
+
+void handleKey(char key) {
+  if (key == 'A') {
+    start_motor();
+  } else if (key == 'B') {
+    stop_motor();
+  } else if (key == '#') {
+    clear_rpm();
+  } else if (key == 'D') {
+    set_rpm_from_bluetooth();
+  } else if (key >= '0' && key <= '9') {
+    update_rpm_value(key);
+  }
+}
+
+void update_rpm_value(char key) {
+  set_rpm = set_rpm * 10 + (key - '0');
+  if (set_rpm > 255) set_rpm = 255; // Batas atas RPM
+  lcd.setCursor(9, 0);
+  lcd.print(set_rpm);
+}
+
+void set_rpm_from_bluetooth() {
+  String rpmValue = "";
+  while (bluetoothSerial.available()) {
+    char c = bluetoothSerial.read();
+    if (c == '\n') break;
+    rpmValue += c;
+  }
+  if (rpmValue[0] == 'D') { // Pastikan data dari slider memiliki format Dxxx
+    rpmValue.remove(0, 1);  // Hapus huruf 'D'
+    set_rpm = rpmValue.toFloat();
+    if (set_rpm > 255) set_rpm = 255;
+    lcd.setCursor(9, 0);
+    lcd.print(set_rpm);
+    update_motor_speed();
+  }
+}
+
+void start_motor() {
+  motorRunning = true;
+  update_motor_speed();
+}
+
+void stop_motor() {
+  motorRunning = false;
+  analogWrite(ENA, 0);
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Set PWM:");
+  lcd.setCursor(0, 1);
+  lcd.print("A: Start B: Stop");
+}
+
+void clear_rpm() {
+  set_rpm = 0;
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Set PWM:");
+  lcd.setCursor(0, 1);
+  lcd.print("A: Start B: Stop");
+}
+
+void update_motor_speed() {
+  speed_pwm = map(set_rpm, 0, 255, 0, 255);
+  analogWrite(ENA, speed_pwm);
+}
+
+void rpm_fun() {
+  pulse_count++;
+}
